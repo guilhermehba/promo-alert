@@ -1,118 +1,190 @@
+import os
 import requests
-import schedule
-import time
-from datetime import datetime
 
-# =========================
-# CONFIGURAÇÕES PRINCIPAIS
-# =========================
-API_BASE_URL = "https://api.isthereanydeal.com/v01/"
-API_KEY = "SUA_API_KEY_AQUI"  # Coloque aqui sua API key do isthereanydeal
-GAMES = ["Cyberpunk 2077", "Elden Ring", "Red Dead Redemption 2"]
-CURRENCY = "BRL"  # Forçar a API a trazer preços em reais (R$)
+# ============================================
+# CONFIGURAÇÕES BÁSICAS
+# ============================================
+TOKEN = os.getenv("TELEGRAM_TOKEN")
+CHAT_ID = os.getenv("CHAT_ID")
+TELEGRAM_URL = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
 
-# =========================
-# FUNÇÕES AUXILIARES
-# =========================
-def get_game_plain(game_name: str) -> str:
+
+# ============================================
+# FUNÇÃO PARA ENVIAR MENSAGEM NO TELEGRAM
+# ============================================
+def send_telegram_message(text: str):
     """
-    Pega o identificador 'plain' do jogo a partir do nome.
-    Esse plain é necessário para consultar os preços na API.
+    Envia uma mensagem para o Telegram usando o bot.
     """
-    url = f"{API_BASE_URL}game/plain/"
-    params = {
-        "key": API_KEY,
-        "title": game_name
-    }
+    if not TOKEN or not CHAT_ID:
+        print("❌ ERRO: TELEGRAM_TOKEN ou CHAT_ID não configurados.")
+        return
+
+    payload = {"chat_id": CHAT_ID, "text": text, "parse_mode": "HTML"}
+    response = requests.post(TELEGRAM_URL, data=payload)
+
+    if response.status_code == 200:
+        print("✅ Mensagem enviada com sucesso:", text)
+    else:
+        print("❌ Erro ao enviar mensagem:", response.text)
+
+
+# ============================================
+# STEAM
+# ============================================
+def check_steam(game_name: str):
     try:
-        response = requests.get(url, params=params)
-        response.raise_for_status()
+        search_url = "https://store.steampowered.com/api/storesearch"
+        params = {"term": game_name, "l": "portuguese", "cc": "br"}
+        response = requests.get(search_url, params=params)
         data = response.json()
 
-        plain = data.get("data", {}).get("plain")
-        if plain:
-            return plain
+        if not data.get("items"):
+            return f"🔎 {game_name}: não encontrado na Steam."
+
+        game = data["items"][0]
+        appid = game["id"]
+
+        details_url = f"https://store.steampowered.com/api/appdetails"
+        params = {"appids": appid, "cc": "br", "l": "portuguese"}
+        response = requests.get(details_url, params=params)
+        details = response.json()
+
+        if not details[str(appid)]["success"]:
+            return f"⚠️ {game_name}: erro ao buscar detalhes na Steam."
+
+        game_data = details[str(appid)]["data"]
+        price_info = game_data.get("price_overview")
+        if not price_info:
+            return f"🎮 {game_name} (Steam): grátis ou sem preço listado."
+
+        initial_price = price_info["initial"] / 100
+        final_price = price_info["final"] / 100
+        discount = price_info["discount_percent"]
+
+        if discount > 0:
+            return (
+                f"🔥 <b>{game_name}</b> (Steam)\n"
+                f"💵 Preço original: R$ {initial_price:.2f}\n"
+                f"💲 Preço com desconto: R$ {final_price:.2f}\n"
+                f"📉 Desconto: {discount}%\n"
+                f"🔗 <a href='https://store.steampowered.com/app/{appid}'>Ver na Steam</a>"
+            )
         else:
-            print(f"[ERRO] Não foi possível encontrar plain para {game_name}")
-            return None
+            return f"❌ {game_name} (Steam): sem promoção. Preço atual: R$ {final_price:.2f}"
+
     except Exception as e:
-        print(f"[ERRO] Falha ao buscar plain de {game_name}: {e}")
-        return None
+        return f"⚠️ Erro Steam ({game_name}): {e}"
 
 
-def get_game_deals(plain: str) -> dict:
-    """
-    Pega os preços em reais (BRL) para o jogo especificado pelo plain.
-    """
-    url = f"{API_BASE_URL}game/prices/"
-    params = {
-        "key": API_KEY,
-        "plains": plain,
-        "region": "BR",   # Região Brasil
-        "country": "BR",  # País Brasil
-        "shops": "steam,epic,gog,greenmangaming,hb"  # Algumas lojas suportadas
-    }
+# ============================================
+# NUVEM
+# ============================================
+def check_nuuvem(game_name: str):
     try:
-        response = requests.get(url, params=params)
-        response.raise_for_status()
+        search_url = "https://www.nuuvem.com/br-pt/catalog.json"
+        params = {"q": game_name}
+        response = requests.get(search_url, params=params)
         data = response.json()
 
-        deals = data.get("data", {}).get(plain, {}).get("list", [])
-        return deals
+        products = data.get("products", [])
+        if not products:
+            return f"🔎 {game_name}: não encontrado na Nuuvem."
+
+        game = products[0]
+        name = game.get("name")
+        url = f"https://www.nuuvem.com{game.get('url')}"
+        price_info = game.get("price", {})
+
+        if not price_info:
+            return f"🎮 {name} (Nuuvem): grátis ou sem preço listado."
+
+        initial = float(price_info.get("amount", price_info.get("original_amount", 0)))
+        promo = float(price_info.get("promotional_amount", initial))
+        discount = game.get("discount", {}).get("percentage", 0)
+
+        if discount > 0:
+            return (
+                f"🔥 <b>{name}</b> (Nuuvem)\n"
+                f"💵 Preço original: R$ {initial:.2f}\n"
+                f"💲 Preço com desconto: R$ {promo:.2f}\n"
+                f"📉 Desconto: {discount}%\n"
+                f"🔗 <a href='{url}'>Ver na Nuuvem</a>"
+            )
+        else:
+            return f"❌ {name} (Nuuvem): sem promoção. Preço atual: R$ {initial:.2f}"
+
     except Exception as e:
-        print(f"[ERRO] Falha ao buscar preços: {e}")
-        return []
+        return f"⚠️ Erro Nuuvem ({game_name}): {e}"
 
 
-def check_promotions():
-    """
-    Verifica promoções em reais para todos os jogos configurados.
-    """
-    print("="*50)
-    print(f"Verificação de promoções - {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}")
-    print("="*50)
+# ============================================
+# GREEN MAN GAMING (GMG)
+# ============================================
+def check_gmg(game_name: str):
+    try:
+        search_url = "https://www.greenmangaming.com/api/v2/catalogue/search/"
+        params = {"query": game_name, "country": "BR"}
+        response = requests.get(search_url, params=params)
+        data = response.json()
 
-    for game in GAMES:
-        plain = get_game_plain(game)
-        if not plain:
-            continue
+        products = data.get("products", [])
+        if not products:
+            return f"🔎 {game_name}: não encontrado na GMG."
 
-        deals = get_game_deals(plain)
-        if not deals:
-            print(f"Nenhuma promoção encontrada para {game}.")
-            continue
+        game = products[0]
+        name = game.get("name")
+        url = f"https://www.greenmangaming.com{game.get('url')}"
+        price_info = game.get("price", {})
 
-        # Mostrar as melhores promoções
-        print(f"\n🎮 {game}")
-        for deal in deals[:3]:  # mostra só os 3 melhores preços
-            shop = deal.get("shop", {}).get("name", "Desconhecido")
-            price_new = deal.get("price_new", 0)
-            price_old = deal.get("price_old", 0)
-            discount = deal.get("price_cut", 0)
+        if not price_info:
+            return f"🎮 {name} (GMG): grátis ou sem preço listado."
 
-            print(f"  - Loja: {shop}")
-            print(f"    Preço atual: R${price_new:.2f}")
-            print(f"    Preço anterior: R${price_old:.2f}")
-            print(f"    Desconto: {discount}%\n")
+        initial = float(price_info.get("rrp", 0))
+        promo = float(price_info.get("price", initial))
+        discount = int(round(100 - (promo * 100 / initial))) if initial > 0 else 0
 
+        if discount > 0:
+            return (
+                f"🔥 <b>{name}</b> (GMG)\n"
+                f"💵 Preço original: R$ {initial:.2f}\n"
+                f"💲 Preço com desconto: R$ {promo:.2f}\n"
+                f"📉 Desconto: {discount}%\n"
+                f"🔗 <a href='{url}'>Ver na GMG</a>"
+            )
+        else:
+            return f"❌ {name} (GMG): sem promoção. Preço atual: R$ {promo:.2f}"
 
-# =========================
-# AGENDAMENTO AUTOMÁTICO
-# =========================
-def run_scheduler():
-    # Define horário fixo: todo dia às 10h
-    schedule.every().day.at("10:00").do(check_promotions)
-
-    print("🔔 Monitor de promoções iniciado!")
-    print("Esperando próximo horário agendado...\n")
-
-    while True:
-        schedule.run_pending()
-        time.sleep(30)
+    except Exception as e:
+        return f"⚠️ Erro GMG ({game_name}): {e}"
 
 
+# ============================================
+# FUNÇÃO PRINCIPAL
+# ============================================
+def check_games():
+    if not os.path.exists("games.txt"):
+        send_telegram_message("⚠️ ERRO: O arquivo games.txt não foi encontrado.")
+        return
+
+    with open("games.txt", "r", encoding="utf-8") as file:
+        games = [line.strip() for line in file.readlines() if line.strip()]
+
+    if not games:
+        send_telegram_message("⚠️ ERRO: Nenhum jogo listado em games.txt.")
+        return
+
+    for game in games:
+        # Steam
+        send_telegram_message(check_steam(game))
+        # Nuuvem
+        send_telegram_message(check_nuuvem(game))
+        # GMG
+        send_telegram_message(check_gmg(game))
+
+
+# ============================================
+# EXECUÇÃO DO SCRIPT
+# ============================================
 if __name__ == "__main__":
-    # Rodar imediatamente na inicialização
-    check_promotions()
-    # Ativar agendamento diário
-    run_scheduler()
+    check_games()
