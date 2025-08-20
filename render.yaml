@@ -1,0 +1,7 @@
+services:
+  - type: cron
+    name: jogos-promocoes
+    env: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: python main.py
+    schedule: "0 12 * * *"   # executa todo dia às 12h (UTC)
